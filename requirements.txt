@@ -1,0 +1,3 @@
+ollama
+pdf2image
+pillow
