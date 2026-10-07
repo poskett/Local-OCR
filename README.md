@@ -1,6 +1,6 @@
 # Local OCR
 
-A Python script to transcribe PDFs and images with a local Ollama vision model. Designed for use by historians and academics.
+A Python script, with a simple browser app, to transcribe PDFs and images with a local Ollama vision model. Designed for use by historians and academics.
 
 ## AI declaration
 The code for this project was generated using Claude Code (Sonnet 5.5). This readme 
@@ -20,18 +20,6 @@ file was generated from the Claude Code project and then edited by James Poskett
 - [Ollama](https://ollama.com) running locally, with a vision-capable model
   pulled (e.g. `ollama pull qwen3-vl:8b-instruct-q4_K_M`)
 
-## Which model?
-
-It is important to use an "instruct" version of a vision model (without reasoning or thinking).
-Otherwise, the model will spend all its tokens reasoning and fail to write a transcript.
-
-A few good options:
-
-- [qwen3-vl:8b-instruct-q4_K_M](https://ollama.com/library/qwen3-vl:8b-instruct-q4_K_M)
-- [ministral-3:8b-instruct-2512-q4_K_M](https://ollama.com/library/ministral-3:8b-instruct-2512-q4_K_M)
-
-Both will run on a M5 MacBook with 16GB RAM. You can increase parameters and quantisation with more powerful hardware.
-
 ## Install
 
 ```
@@ -44,6 +32,14 @@ Ollama must be installed and running (the desktop app, or `ollama serve`).
 
 ## Use
 
+### App
+
+```
+streamlit run app.py
+```
+
+### Terminal
+
 ```
 python local_ocr.py /path/to/folder
 python local_ocr.py scan.pdf --document-type handwriting
@@ -54,21 +50,40 @@ caffeinate -i python local_ocr.py /path/to/folder
 
 Document types (`--document-type`): `auto` (default), `printed`, `handwriting`. Use `--prompt` or `--prompt-file` for your own.
 
-Default model options: temperature 0, repeat_penalty 1.3, num_predict 4096 (maximum tokens per page; stops a looping model), num_ctx 8192. Override any with `--option key=value`.
+Default model options: temperature 0.2, repeat_penalty 1.3, num_predict 4096 (maximum tokens per page; stops a looping model), num_ctx 8192. Override any with `--option key=value`.
 
 ## Output
 
-Written to `ocr_output/<model name>/` next to the input (or inside `--output`), e.g. `ocr_output/qwen3-vl_8b/`. Each model gets its own folder, so running the same input with a different model starts fresh and keeps the results side by side. Colons in model names become underscores. Inside that folder:
+Each run goes into a project folder, by default `~/Documents/OCR/<input folder name>/` (choose another with `--output`, or type a project name in the app). The original files are copied in, so every image sits next to its transcript:
 
-- `manifest.csv`: one row per page attempt (model, model digest, prompt, options, status, timing).
-- `run_log_YYYY-MM-DD_HHMMSS.txt`: the same progress lines you see on screen, with ETA. A new log is started each run, so a resumed run gets its own file.
+```
+~/Documents/OCR/
+  Box 12 Letters/
+    manifest.csv
+    logs/run_log_2026-10-06_141244.txt
+    prompts/623494842f.txt
+    IMG_0001.jpg
+    IMG_0001.txt
+    Folder A/                 sub-folders of the input are kept
+      IMG_0100.jpg
+      IMG_0100.txt
+    Letter 1745/              one folder per PDF
+      Letter 1745.pdf
+      page_0001.png
+      page_0001.txt
+```
+
+- `manifest.csv`: one row per page attempt (model, model digest, prompt, options, status, timing). The model is recorded here rather than in the folder name.
+- `logs/`: the same progress lines you see on screen, with ETA. Each run starts a new log, so a resumed run gets its own file.
 - `prompts/`: the exact prompt used, named by the hash in the manifest.
-- Single images: one flat transcript per image, e.g. `IMG_001_jpg.txt` (the extension is kept so `IMG_001.jpg` and `IMG_001.png` never clash). TIFFs, and any image resized with `--max-side`, are also saved as a PNG copy in `images/`.
-- PDFs: one folder per PDF, containing `images/` (cached page renders), and one transcript per page (`page_0001.txt` etc.).
+- If two images in one folder share a name (`IMG_1.jpg` and `IMG_1.png`), their transcripts keep the extension (`IMG_1_jpg.txt`, `IMG_1_png.txt`) so they never clash.
+- `converted/`: PNG copies of TIFFs, and of any image resized with `--max-side`, which is what the model actually reads.
+
+To compare models on the same material, use a different project name for each model. Resuming skips any page that already has a `.txt`, whichever model wrote it.
 
 ## Stopping and resuming
 
-Press Ctrl+C at any time. Finished pages are saved. Run the same command again to continue; pages that already have a `.txt` are skipped and pages that failed are retried. Use `--overwrite` to redo everything (the manifest gains new rows; it is a log, not a summary).
+Press Ctrl+C at any time (or stop the run in the app). Finished pages are saved. Run the same command again to continue; pages that already have a `.txt` are skipped and pages that failed are retried. Use `--overwrite` to redo everything (the manifest gains new rows; it is a log, not a summary).
 
 If 5 pages in a row fail (for example because Ollama has quit), the run stops with a message instead of logging thousands of errors. Change the number with `--max-errors N`, or use `--max-errors 0` to never stop. Run the same command again to resume.
 

@@ -18,10 +18,11 @@ from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
 
 DEFAULT_MODEL = "qwen3-vl:8b-instruct-q4_K_M"
+DEFAULT_OCR_FOLDER = Path.home() / "Documents" / "OCR"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 DIRECT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 DEFAULT_OPTIONS = {
-    "temperature": 0,
+    "temperature": 0.2,
     "repeat_penalty": 1.3,
     "num_predict": 4096,
     "num_ctx": 8192,
@@ -137,9 +138,32 @@ def find_files(input_path, output_root):
     return files
 
 
-def folder_name(path, base_dir):
-    relative = path.relative_to(base_dir)
-    return "__".join(relative.parts).replace(".", "_")
+def place_job(source, base_dir, output_dir, single_file, stem_clash):
+    rel_dir = source.parent.relative_to(base_dir)
+    out_dir = output_dir / rel_dir
+    job = {"source": source}
+    if source.suffix.lower() == ".pdf":
+        job["folder"] = output_dir if single_file else out_dir / source.stem
+    else:
+        job["folder"] = out_dir
+        if stem_clash:
+            txt_name = f"{source.stem}_{source.suffix[1:].lower()}"
+        else:
+            txt_name = source.stem
+        job["txt_path"] = out_dir / f"{txt_name}.txt"
+        job["converted"] = output_dir / "converted" / rel_dir / f"{txt_name}.png"
+    job["copy"] = job["folder"] / source.name
+    return job
+
+
+def copy_original(job):
+    source, target = job["source"], job["copy"]
+    job["folder"].mkdir(parents=True, exist_ok=True)
+    if target.exists() or target.resolve() == source.resolve():
+        return
+    tmp_path = target.with_name(target.name + ".tmp")
+    shutil.copy2(source, tmp_path)
+    os.replace(tmp_path, target)
 
 
 def save_png(image, path, max_side):
@@ -151,12 +175,11 @@ def save_png(image, path, max_side):
     os.replace(tmp_path, path)
 
 
-def get_page_image(job, page, images_dir, args):
-    source = job["source"]
+def get_page_image(job, page, args):
+    source = job["copy"]
     if source.suffix.lower() == ".pdf":
-        png_path = images_dir / f"page_{page:04d}.png"
+        png_path = job["folder"] / f"page_{page:04d}.png"
         if not png_path.exists():
-            images_dir.mkdir(parents=True, exist_ok=True)
             rendered = convert_from_path(
                 str(source), dpi=args.dpi, first_page=page, last_page=page
             )
@@ -164,9 +187,9 @@ def get_page_image(job, page, images_dir, args):
         return png_path
     if source.suffix.lower() in DIRECT_IMAGE_EXTENSIONS and not args.max_side:
         return source
-    png_path = images_dir / f"{job['name']}.png"
+    png_path = job["converted"]
     if not png_path.exists():
-        images_dir.mkdir(parents=True, exist_ok=True)
+        png_path.parent.mkdir(parents=True, exist_ok=True)
         save_png(Image.open(source), png_path, args.max_side)
     return png_path
 
@@ -225,22 +248,17 @@ def progress_line(job, page, seconds):
     )
 
 
-def process_job(job, output_dir, prompt, options, args):
+def process_job(job, prompt, options, args):
     is_pdf = job["source"].suffix.lower() == ".pdf"
-    if is_pdf:
-        folder_dir = output_dir / job["name"]
-        folder_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        folder_dir = output_dir
-    images_dir = folder_dir / "images"
+    copy_original(job)
     skipped_here = 0
     try:
         for page in range(1, job["pages"] + 1):
             state["position"] += 1
             if is_pdf:
-                txt_path = folder_dir / f"page_{page:04d}.txt"
+                txt_path = job["folder"] / f"page_{page:04d}.txt"
             else:
-                txt_path = output_dir / f"{job['name']}.txt"
+                txt_path = job["txt_path"]
             if txt_path.exists() and not args.overwrite:
                 state["skipped"] += 1
                 skipped_here += 1
@@ -248,7 +266,7 @@ def process_job(job, output_dir, prompt, options, args):
             started = time.time()
             image_path = None
             try:
-                image_path = get_page_image(job, page, images_dir, args)
+                image_path = get_page_image(job, page, args)
                 text, done_reason, error = transcribe(image_path, prompt, args, options)
             except Exception as problem:
                 text, done_reason, error = None, None, f"image preparation failed: {problem}"
@@ -305,7 +323,7 @@ def process_job(job, output_dir, prompt, options, args):
 def main():
     parser = argparse.ArgumentParser(description="OCR PDFs and images with a local Ollama vision model.")
     parser.add_argument("input", help="A PDF, an image, or a folder containing them")
-    parser.add_argument("--output", help="Output folder (default: ocr_output next to the input). A subfolder named after the model is added inside it")
+    parser.add_argument("--output", help=f"Project folder for the results (default: {DEFAULT_OCR_FOLDER}/<input name>)")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--document-type", choices=list(PROMPTS), default="auto")
     parser.add_argument("--prompt", help="Custom prompt text (replaces the preset)")
@@ -326,12 +344,11 @@ def main():
         sys.exit(f"Not found: {input_path}")
     base_dir = input_path if input_path.is_dir() else input_path.parent
     if args.output:
-        output_root = Path(args.output).expanduser().resolve()
+        output_dir = Path(args.output).expanduser().resolve()
     else:
-        output_root = base_dir / "ocr_output"
-    output_dir = output_root / args.model.replace(":", "_").replace("/", "_")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    state["log_file"] = output_dir / f"run_log_{datetime.now():%Y-%m-%d_%H%M%S}.txt"
+        output_dir = DEFAULT_OCR_FOLDER / (input_path.name if input_path.is_dir() else input_path.stem)
+    (output_dir / "logs").mkdir(parents=True, exist_ok=True)
+    state["log_file"] = output_dir / "logs" / f"run_log_{datetime.now():%Y-%m-%d_%H%M%S}.txt"
     state["manifest_file"] = output_dir / "manifest.csv"
 
     if args.prompt_file:
@@ -375,7 +392,7 @@ def main():
         "options": json.dumps(options, sort_keys=True),
     }
 
-    files = find_files(input_path, output_root)
+    files = find_files(input_path, output_dir)
     if not files:
         sys.exit("No PDFs or images found.")
     if any(f.suffix.lower() == ".pdf" for f in files) and not shutil.which("pdftoppm"):
@@ -399,6 +416,9 @@ def main():
             f"usually better for OCR. {watchdog_note}"
         )
 
+    image_stems = [
+        (f.parent, f.stem.lower()) for f in files if f.suffix.lower() in IMAGE_EXTENSIONS
+    ]
     jobs = []
     for source in files:
         if source.suffix.lower() == ".pdf":
@@ -414,14 +434,17 @@ def main():
                 continue
         else:
             pages = 1
-        jobs.append({"source": source, "name": folder_name(source, base_dir), "pages": pages})
+        stem_clash = image_stems.count((source.parent, source.stem.lower())) > 1
+        job = place_job(source, base_dir, output_dir, input_path.is_file(), stem_clash)
+        job["pages"] = pages
+        jobs.append(job)
     state["total"] = sum(job["pages"] for job in jobs)
     log(f"{state['total']} page(s) to check")
 
     run_started = time.time()
     try:
         for job in jobs:
-            if process_job(job, output_dir, prompt, options, args):
+            if process_job(job, prompt, options, args):
                 break
     except KeyboardInterrupt:
         log("Interrupted. Finished pages are saved. To resume, run the same command again:")

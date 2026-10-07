@@ -1,3 +1,4 @@
 ollama
 pdf2image
 pillow
+streamlit
