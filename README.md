@@ -22,7 +22,7 @@ file was generated from the Claude Code project and then edited by James Poskett
 
 ## Install
 
-Download the latest release of this repo (including app.py, local_ocr.py, and requirements.txt).
+Download the latest release of this repo (including app.py, local_ocr.py, requirements.txt, and .streamlit).
 
 ```
 brew install poppler
