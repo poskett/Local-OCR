@@ -40,6 +40,7 @@ Ollama must be installed and running (the desktop app, or `ollama serve`).
 streamlit run app.py
 ```
 
+
 ### Terminal
 
 ```

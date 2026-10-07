@@ -1,4 +1,5 @@
 # Declaration: Code generated using Anthropic Claude (Opus 5.5)
+import json
 import os
 import re
 import shlex
@@ -18,6 +19,34 @@ from local_ocr import DEFAULT_MODEL, DEFAULT_OCR_FOLDER, DEFAULT_OPTIONS, PROMPT
 
 APP_DIR = Path(__file__).resolve().parent
 SCRIPT = APP_DIR / "local_ocr.py"
+SETTINGS_FILE = APP_DIR / "settings.json"
+SETTING_DEFAULTS = {
+    "document_type": next(iter(PROMPTS)),
+    "language": "",
+    "temperature": float(DEFAULT_OPTIONS["temperature"]),
+    "repeat_penalty": float(DEFAULT_OPTIONS["repeat_penalty"]),
+    "num_predict": int(DEFAULT_OPTIONS["num_predict"]),
+    "num_ctx": int(DEFAULT_OPTIONS["num_ctx"]),
+    "keep_alive": "",
+    "dpi": 200,
+    "max_side": 0,
+    "retries": 2,
+    "max_think_tokens": 300,
+    "max_errors": 5,
+    "overwrite": False,
+    "ocr_folder_text": str(DEFAULT_OCR_FOLDER),
+}
+SETTING_LIMITS = {
+    "temperature": (0.0, 1.5),
+    "repeat_penalty": (1.0, 2.0),
+    "num_predict": (256, 32768),
+    "num_ctx": (2048, 131072),
+    "dpi": (72, 600),
+    "max_side": (0, 10000),
+    "retries": (0, 10),
+    "max_think_tokens": (0, 10000),
+    "max_errors": (0, 100),
+}
 UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "tif", "tiff"]
 MAX_UPLOAD_MB = 2000
 PROGRESS_PATTERN = re.compile(r"\[(\d+)/(\d+)\]")
@@ -27,6 +56,52 @@ st.set_page_config(page_title="Local OCR", page_icon="📜", layout="wide")
 for key, value in {"proc": None, "log_lines": [], "output_dir": None, "command": None, "return_code": None, "upload_dir": None}.items():
     if key not in st.session_state:
         st.session_state[key] = value
+
+
+def load_settings():
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_settings(settings):
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def saved_value_is_usable(key, value):
+    default = SETTING_DEFAULTS[key]
+    if key == "document_type":
+        return value in PROMPTS
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, str):
+        return isinstance(value, str)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    low, high = SETTING_LIMITS[key]
+    return low <= value <= high
+
+
+def apply_saved_settings(saved):
+    for key, default in SETTING_DEFAULTS.items():
+        value = saved.get(key)
+        if key not in st.session_state:
+            usable = key in saved and saved_value_is_usable(key, value)
+            st.session_state[key] = type(default)(value) if usable else default
+    saved_prompts = saved.get("prompts")
+    if not isinstance(saved_prompts, dict):
+        saved_prompts = {}
+    for name, default_prompt in PROMPTS.items():
+        text = saved_prompts.get(name)
+        st.session_state.setdefault(f"prompt_{name}", text if isinstance(text, str) else default_prompt)
+
+
+def reset_settings():
+    SETTINGS_FILE.unlink(missing_ok=True)
+    for key in [*SETTING_DEFAULTS, "model", *[f"prompt_{name}" for name in PROMPTS]]:
+        st.session_state.pop(key, None)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -162,6 +237,9 @@ def show_results(output_dir):
         text_col.text_area("Transcript", txt_path.read_text(encoding="utf-8"), height=600, disabled=True)
 
 
+saved_settings = load_settings()
+apply_saved_settings(saved_settings)
+
 with st.sidebar:
     st.header("Settings")
 
@@ -173,8 +251,13 @@ with st.sidebar:
         model_error = "Cannot reach Ollama. Start it with `ollama serve`, then reload."
     if model_error:
         st.error(model_error)
-    default_index = models.index(DEFAULT_MODEL) if DEFAULT_MODEL in models else 0
-    model = st.selectbox("Model", models, index=default_index)
+    if st.session_state.get("model") not in models:
+        wanted = saved_settings.get("model")
+        if wanted in models:
+            st.session_state.model = wanted
+        else:
+            st.session_state.model = DEFAULT_MODEL if DEFAULT_MODEL in models else models[0]
+    model = st.selectbox("Model", models, key="model")
     if st.button("Refresh model list", icon=":material/refresh:", type="tertiary"):
         list_models.clear()
         st.rerun()
@@ -183,13 +266,13 @@ with st.sidebar:
         "Document type",
         list(PROMPTS),
         format_func=lambda name: name.capitalize(),
+        key="document_type",
     )
-    language = st.text_input("Language (optional)", placeholder="e.g. early modern Latin")
+    language = st.text_input("Language (optional)", placeholder="e.g. early modern Latin", key="language")
 
     with st.expander("Prompt"):
         prompt_text = st.text_area(
             "Prompt sent to the model",
-            value=PROMPTS[document_type],
             height=260,
             key=f"prompt_{document_type}",
         )
@@ -197,20 +280,35 @@ with st.sidebar:
             st.caption("Edited — this will be recorded as a custom prompt.")
 
     with st.expander("Model options"):
-        temperature = st.slider("Temperature", 0.0, 1.5, float(DEFAULT_OPTIONS["temperature"]), 0.05)
-        repeat_penalty = st.slider("Repeat penalty", 1.0, 2.0, float(DEFAULT_OPTIONS["repeat_penalty"]), 0.05)
-        num_predict = st.number_input("Max output tokens (num_predict)", 256, 32768, DEFAULT_OPTIONS["num_predict"], 256)
-        num_ctx = st.number_input("Context window (num_ctx)", 2048, 131072, DEFAULT_OPTIONS["num_ctx"], 1024)
-        keep_alive = st.text_input("Keep model loaded for", placeholder="e.g. 30m (blank = Ollama default)")
+        temperature = st.slider("Temperature", 0.0, 1.5, step=0.05, key="temperature")
+        repeat_penalty = st.slider("Repeat penalty", 1.0, 2.0, step=0.05, key="repeat_penalty")
+        num_predict = st.number_input("Max output tokens (num_predict)", 256, 32768, step=256, key="num_predict")
+        num_ctx = st.number_input("Context window (num_ctx)", 2048, 131072, step=1024, key="num_ctx")
+        keep_alive = st.text_input("Keep model loaded for", placeholder="e.g. 30m (blank = Ollama default)", key="keep_alive")
 
     with st.expander("Image and run options"):
-        dpi = st.number_input("PDF render DPI", 72, 600, 200, 25)
-        max_side = st.number_input("Shrink longest side to (px, 0 = off)", 0, 10000, 0, 100)
-        retries = st.number_input("Retries per page", 0, 10, 2)
-        max_think_tokens = st.number_input("Max thinking tokens (0 = no limit)", 0, 10000, 300, 50)
-        max_errors = st.number_input("Stop after errors in a row (0 = never)", 0, 100, 5)
-        overwrite = st.toggle("Redo pages that already have a transcript")
-        ocr_folder_text = st.text_input("OCR folder (holds all projects)", value=str(DEFAULT_OCR_FOLDER))
+        dpi = st.number_input("PDF render DPI", 72, 600, step=25, key="dpi")
+        max_side = st.number_input("Shrink longest side to (px, 0 = off)", 0, 10000, step=100, key="max_side")
+        retries = st.number_input("Retries per page", 0, 10, key="retries")
+        max_think_tokens = st.number_input("Max thinking tokens (0 = no limit)", 0, 10000, step=50, key="max_think_tokens")
+        max_errors = st.number_input("Stop after errors in a row (0 = never)", 0, 100, key="max_errors")
+        overwrite = st.toggle("Redo pages that already have a transcript", key="overwrite")
+        ocr_folder_text = st.text_input("OCR folder (holds all projects)", key="ocr_folder_text")
+
+    st.button("Reset settings to defaults", icon=":material/restart_alt:", type="tertiary", on_click=reset_settings)
+
+current_settings = {key: st.session_state[key] for key in SETTING_DEFAULTS}
+current_settings["model"] = saved_settings.get("model", model) if model_error else model
+current_settings["prompts"] = {
+    name: st.session_state[f"prompt_{name}"]
+    for name in PROMPTS
+    if st.session_state[f"prompt_{name}"].strip() != PROMPTS[name].strip()
+}
+if current_settings != saved_settings:
+    try:
+        save_settings(current_settings)
+    except OSError:
+        st.sidebar.warning("Could not save settings.json in the app folder.")
 
 st.title("Local OCR")
 st.caption("Transcribe PDFs and images with a local vision model through Ollama. Nothing leaves this computer.")
